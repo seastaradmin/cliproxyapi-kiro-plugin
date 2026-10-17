@@ -46,4 +46,6 @@ type kiroCredential struct {
 	Region       string `json:"region"`
 	IDCRegion    string `json:"idcRegion"`
 	ProfileArn   string `json:"profileArn"`
+	Plan         string `json:"plan"`
+	CreditLimit  *int64 `json:"creditLimit"`
 }

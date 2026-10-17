@@ -70,6 +70,10 @@ plugins:
 curl -s http://127.0.0.1:8317/v1/models | grep -i claude
 ```
 
+## 模型权限
+
+当账号无法从 Kiro 管理端获取账号级模型列表时，插件对 Builder ID / social 凭据使用 Free 套餐安全列表：Sonnet 4.5、Sonnet 4.0、Auto，以及 Kiro Free 文档列出的开放权重模型。付费账号可在凭据 JSON 中提供 `plan`（如 `pro`）或大于 50 的 `creditLimit`，插件才会暴露完整模型目录；执行请求还会再次校验 Free 套餐模型权限。
+
 ## 许可证
 
 [MIT](./LICENSE)

@@ -35,10 +35,25 @@ var kiroModelIDs = []string{
 	"claude-haiku-4-5",
 }
 
+// freeKiroModelIDs is the documented Free-tier allowlist. Builder ID
+// credentials do not expose a profile ARN, so their account-scoped model list
+// cannot be queried; the conservative fallback must not advertise paid models.
+var freeKiroModelIDs = []string{
+	"auto",
+	"claude-sonnet-4-5",
+	"claude-sonnet-4-0",
+	"deepseek-3.2",
+	"minimax-m2.5",
+	"glm-5",
+	"minimax-m2.1",
+	"qwen3-coder-next",
+}
+
 // modelMapping translates a client-facing model name to the CodeWhisperer-native
 // model name sent upstream. It ONLY normalizes the version separator (client
 // "claude-opus-4-8" -> upstream "claude-opus-4.8"); it deliberately does NOT
-// collapse several versions onto one model.
+// collapse several versions onto one model. Premium availability is filtered
+// separately by credentialUsesFreeCatalog.
 //
 // Per-account availability is enforced UPSTREAM: Kiro accepts or rejects each
 // model (INVALID_MODEL_ID) according to the account's plan/tier. The plugin must
@@ -93,8 +108,12 @@ func clientKiroModelID(id string) string {
 // retained for static compatibility, while model.for_auth uses the account's
 // management response below.
 func kiroModels() []pluginapi.ModelInfo {
-	models := make([]pluginapi.ModelInfo, 0, len(kiroModelIDs))
-	for _, id := range kiroModelIDs {
+	return kiroModelsFromIDs(kiroModelIDs)
+}
+
+func kiroModelsFromIDs(ids []string) []pluginapi.ModelInfo {
+	models := make([]pluginapi.ModelInfo, 0, len(ids))
+	for _, id := range ids {
 		models = append(models, pluginapi.ModelInfo{
 			ID:                         id,
 			Object:                     "model",
@@ -110,6 +129,40 @@ func kiroModels() []pluginapi.ModelInfo {
 		})
 	}
 	return models
+}
+
+func credentialUsesFreeCatalog(cred kiroCredential) bool {
+	plan := strings.ToLower(strings.TrimSpace(cred.Plan))
+	switch plan {
+	case "pro", "pro+", "pro-plus", "pro_max", "pro-max", "power":
+		return false
+	case "free":
+		return true
+	}
+	if cred.CreditLimit != nil {
+		return *cred.CreditLimit <= 50
+	}
+	authMethod := strings.ToLower(strings.TrimSpace(cred.AuthMethod))
+	return authMethod == "builder-id" || authMethod == "social"
+}
+
+func staticModelIDsForCredential(cred kiroCredential) []string {
+	if credentialUsesFreeCatalog(cred) {
+		return freeKiroModelIDs
+	}
+	return kiroModelIDs
+}
+
+func modelAllowedForCredential(model string, cred kiroCredential) bool {
+	if strings.TrimSpace(model) == "" || !credentialUsesFreeCatalog(cred) {
+		return true
+	}
+	for _, id := range freeKiroModelIDs {
+		if model == id || model == clientKiroModelID(id) || model == strings.ReplaceAll(id, "-", ".") {
+			return true
+		}
+	}
+	return false
 }
 
 // authModelRequest mirrors the host's rpcAuthModelRequest: the embedded
@@ -162,9 +215,8 @@ type tokenLimits struct {
 // (ListAvailableProfiles returns AccessDenied for them). Chat still works for
 // those accounts without a profileArn, so instead of returning an error — which
 // makes the host UNREGISTER every model for this auth and surfaces as "no models
-// bound" — we fall back to the static catalog. Per-account availability is still
-// enforced upstream at chat time (INVALID_MODEL_ID), consistent with the
-// modelMapping design note above.
+// bound" — we fall back to the credential-appropriate static catalog. Free
+// Builder ID/social credentials use the documented Free-tier allowlist.
 func kiroModelsForAuth(request []byte) ([]byte, error) {
 	var req authModelRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
@@ -182,7 +234,7 @@ func kiroModelsForAuth(request []byte) ([]byte, error) {
 	// region 非法时不发任何请求,退回静态目录(与其他发现失败情形一致)。
 	region, errRegion := resolveRegion(cred.Region, cred.IDCRegion)
 	if errRegion != nil {
-		return staticModelsEnvelope()
+		return staticModelsEnvelopeFor(cred)
 	}
 
 	// ListAvailableModels hard-requires a valid profileArn. IdC / organization
@@ -196,7 +248,7 @@ func kiroModelsForAuth(request []byte) ([]byte, error) {
 		profileArn = discoverProfileArn(cred, req.HostCallbackID, region)
 	}
 	if profileArn == "" {
-		return staticModelsEnvelope()
+		return staticModelsEnvelopeFor(cred)
 	}
 
 	body, errMarshal := json.Marshal(listAvailableModelsRequest{
@@ -210,7 +262,7 @@ func kiroModelsForAuth(request []byte) ([]byte, error) {
 	// 请求头携带 accessToken:region 不合法时退回静态目录,绝不发往未校验主机。
 	modelsURL, errURL := safeEndpoint(listAvailableModelsURLTemplate, region, "")
 	if errURL != nil {
-		return staticModelsEnvelope()
+		return staticModelsEnvelopeFor(cred)
 	}
 
 	resp, errDo := kiroHTTPDo(hostapi.HTTPRequest{
@@ -222,16 +274,16 @@ func kiroModelsForAuth(request []byte) ([]byte, error) {
 	})
 	// On any discovery failure, degrade to the static catalog rather than error.
 	if errDo != nil || resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return staticModelsEnvelope()
+		return staticModelsEnvelopeFor(cred)
 	}
 
 	var decoded listAvailableModelsResponse
 	if errUnmarshal := json.Unmarshal(resp.Body, &decoded); errUnmarshal != nil {
-		return staticModelsEnvelope()
+		return staticModelsEnvelopeFor(cred)
 	}
 	models := availableModelsToPluginModels(decoded.Models)
 	if len(models) == 0 {
-		return staticModelsEnvelope()
+		return staticModelsEnvelopeFor(cred)
 	}
 
 	return wire.OK(pluginapi.ModelResponse{
@@ -242,10 +294,10 @@ func kiroModelsForAuth(request []byte) ([]byte, error) {
 
 // staticModelsEnvelope wraps the static model catalog in a model.for_auth OK
 // envelope. Used as the fallback when account-scoped discovery is unavailable.
-func staticModelsEnvelope() ([]byte, error) {
+func staticModelsEnvelopeFor(cred kiroCredential) ([]byte, error) {
 	return wire.OK(pluginapi.ModelResponse{
 		Provider: providerKiro,
-		Models:   kiroModels(),
+		Models:   kiroModelsFromIDs(staticModelIDsForCredential(cred)),
 	})
 }
 

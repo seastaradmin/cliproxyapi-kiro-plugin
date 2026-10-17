@@ -63,6 +63,9 @@ func fetchKiroEvents(request []byte) (*kiroExecResult, []byte, error) {
 	}
 
 	model := firstNonEmptyStr(req.Model, creq.Model)
+	if !modelAllowedForCredential(model, cred) {
+		return nil, wire.ErrorStatus("model_not_available", "model is not available for this Kiro plan", http.StatusForbidden), nil
+	}
 	// 请求头携带 accessToken,故端点主机必须由校验过的 region 推导。
 	region, errRegion := resolveRegion(cred.Region, cred.IDCRegion)
 	if errRegion != nil {

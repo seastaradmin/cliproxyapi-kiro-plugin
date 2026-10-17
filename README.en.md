@@ -70,6 +70,10 @@ Verify after login:
 curl -s http://127.0.0.1:8317/v1/models | grep -i claude
 ```
 
+## Model permissions
+
+When Kiro account-scoped model discovery is unavailable, Builder ID and social credentials use a conservative Free-tier catalog: Sonnet 4.5, Sonnet 4.0, Auto, and the open-weight models documented for Kiro Free. Paid credentials can provide `plan` (for example `pro`) or a `creditLimit` greater than 50 to expose the full catalog. Executor requests enforce the same Free-tier guard.
+
 ## License
 
 [MIT](./LICENSE)

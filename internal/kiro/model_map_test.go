@@ -329,10 +329,36 @@ func TestKiroModelsForAuthFallsBackToStaticCatalog(t *testing.T) {
 			if errUnmarshal := json.Unmarshal(envelope.Result, &result); errUnmarshal != nil {
 				t.Fatalf("decode model response: %v", errUnmarshal)
 			}
-			if result.Provider != providerKiro || len(result.Models) != len(kiroModelIDs) {
-				t.Fatalf("expected static catalog (%d models), got provider=%q models=%d", len(kiroModelIDs), result.Provider, len(result.Models))
+			var cred kiroCredential
+			if errUnmarshal := json.Unmarshal([]byte(tt.storage), &cred); errUnmarshal != nil {
+				t.Fatalf("decode test credential: %v", errUnmarshal)
+			}
+			wantCount := len(staticModelIDsForCredential(cred))
+			if result.Provider != providerKiro || len(result.Models) != wantCount {
+				t.Fatalf("expected static catalog (%d models), got provider=%q models=%d", wantCount, result.Provider, len(result.Models))
 			}
 		})
+	}
+}
+
+func TestFreeCatalogAndExecutionGuard(t *testing.T) {
+	cred := kiroCredential{AuthMethod: "builder-id"}
+	if len(staticModelIDsForCredential(cred)) != len(freeKiroModelIDs) {
+		t.Fatalf("builder-id should use free catalog")
+	}
+	for _, model := range []string{"claude-sonnet-4-5", "deepseek-3.2", "qwen3-coder-next"} {
+		if !modelAllowedForCredential(model, cred) {
+			t.Fatalf("free model %q rejected", model)
+		}
+	}
+	for _, model := range []string{"claude-opus-4-5", "claude-sonnet-5"} {
+		if modelAllowedForCredential(model, cred) {
+			t.Fatalf("paid model %q accepted for free credential", model)
+		}
+	}
+	paid := kiroCredential{AuthMethod: "builder-id", Plan: "pro"}
+	if !modelAllowedForCredential("claude-opus-4-5", paid) {
+		t.Fatal("paid plan should allow premium model")
 	}
 }
 
